@@ -1,0 +1,63 @@
+# 环境配置（敏感信息）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 生成的数据集（文件太大）
+dataset/
+*.mp3
+*.wav
+
+# 日志
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# CosyVoice 预训练模型（太大）
+CosyVoice/pretrained_models/
+
+# 大型数据文件（可选择性忽略）
+# aishell_transcript_v0.8.txt
