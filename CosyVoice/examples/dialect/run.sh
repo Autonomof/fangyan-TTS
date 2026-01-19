@@ -21,8 +21,8 @@ stop_stage=5
 
 # 数据目录 (相对于项目根目录)
 data_dir=../../../dataset
-# 预训练模型目录
-pretrained_model_dir=../../../pretrained_models/Fun-CosyVoice3-0.5B
+# 预训练模型目录 (相对于 examples/dialect 目录)
+pretrained_model_dir=../../pretrained_models/Fun-CosyVoice3-0.5B
 
 # 方言列表
 dialects="combined"
