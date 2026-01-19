@@ -70,7 +70,7 @@ def main():
                         default="CosyVoice/examples/dialect/cosyvoice3/exp/dialect/llm/torch_ddp/llm.pt",
                         help="微调后的 LLM 权重路径")
     parser.add_argument("--prompt_wav", type=str,
-                        default="CosyVoice/asset/zero_shot_prompt.wav",
+                        default="/sharedata/user/qianbin/CosyVoice/CosyVoice_newest/CosyVoice/person/person2.mp3",
                         help="参考音频路径")
     parser.add_argument("--output_dir", type=str,
                         default="./comparison_output",
@@ -81,34 +81,41 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # 测试文本和指令
-    test_cases = [
-        {
-            "name": "hunan",
-            "text": "今天天气真好，我们一起去公园玩吧。",
-            "instruct": "请用湖南话说这句话。<|endofprompt|>"
-        },
-        {
-            "name": "sichuan", 
-            "text": "这个菜太辣了，我吃不下去了。",
-            "instruct": "请用四川话说这句话。<|endofprompt|>"
-        },
-        {
-            "name": "cantonese",
-            "text": "好少咯，一般系放嗰啲国庆啊，中秋嗰啲可能会咯。",
-            "instruct": "请用广东话说这句话。<|endofprompt|>"
-        },
-        {
-            "name": "dongbei",
-            "text": "这事儿整的，咋整的这么好呢！",
-            "instruct": "请用东北话说这句话。<|endofprompt|>"
-        },
-        {
-            "name": "shanghai",
-            "text": "侬好，今朝天气老好额，阿拉一道去白相相。",
-            "instruct": "请用上海话说这句话。<|endofprompt|>"
-        },
+    # 测试文本列表
+    test_texts = [
+        "骏马奔腾启新程，祝你新年万事胜意!",
+        "愿你怀抱初心，所行皆坦途!",
+        "祝你身体康健如青山，笑口常开似花开!",
+        "愿你乘风破浪，新的一年光芒万丈!",
+        "祝你身体康健如青山，笑口常开似花开!",
+        "愿你新的一年，策马春风里，前程锦绣中!",
+        "福启新岁，愿你新年一马当先，好事连连!",
+        "愿你怀抱初心，所行皆坦途",
+        "新年到!给您拜年啦，祝您马年行大运!",
+        "马年到，鸿运照，祝你骏业腾飞!",
+        "福启新岁，愿你新年一马当先，好事连连!",
+        "愿你新的一年，策马春风里，前程锦绣中!",
+        "马年到，祝您百事欢宜，马到成功!",
+        "愿你骏马乘风，新征程上踏出万里锦程!",
+        "祝您在新的一年里，日子奔腾红火，生活一马当先!",
     ]
+    
+    # 方言配置：只测试河南话和湖南话
+    dialects = [
+        {"name": "henan", "instruct": "请用河南话说这句话。<|endofprompt|>"},
+        {"name": "hunan", "instruct": "请用湖南话说这句话。<|endofprompt|>"},
+    ]
+    
+    # 生成测试用例：每个方言 x 每条文本
+    test_cases = []
+    for dialect in dialects:
+        for i, text in enumerate(test_texts, 1):
+            test_cases.append({
+                "name": dialect["name"],
+                "text": text,
+                "instruct": dialect["instruct"],
+                "index": i
+            })
     
     # 检查文件是否存在
     if not os.path.exists(args.pretrained_dir):
@@ -128,8 +135,8 @@ def main():
     original_model = load_model(args.pretrained_dir)
     
     print("\n生成原始模型音频...")
-    for i, case in enumerate(test_cases, 1):
-        output_path = output_dir / f"{case['name']}_{i}_original.wav"
+    for case in test_cases:
+        output_path = output_dir / f"{case['name']}_{case['index']}_original.wav"
         generate_audio(
             original_model, 
             case['text'], 
@@ -148,8 +155,8 @@ def main():
         finetuned_model = load_model(args.pretrained_dir, args.finetuned_llm)
         
         print("\n生成微调后模型音频...")
-        for i, case in enumerate(test_cases, 1):
-            output_path = output_dir / f"{case['name']}_{i}_finetuned.wav"
+        for case in test_cases:
+            output_path = output_dir / f"{case['name']}_{case['index']}_finetuned.wav"
             generate_audio(
                 finetuned_model,
                 case['text'],
