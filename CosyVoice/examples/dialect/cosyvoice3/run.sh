@@ -42,15 +42,45 @@ fi
 
 if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
   echo "Stage 3: Prepare parquet format data"
+  
+  # 获取数据目录的绝对路径
+  abs_data_dir=$(cd "${data_dir}" && pwd)
+  echo "数据目录绝对路径: ${abs_data_dir}"
+  
   mkdir -p ${data_dir}/parquet
   if [ -f "${data_dir}/parquet/data.list" ]; then
-    echo "已存在，跳过"
+    echo "parquet 已存在，跳过生成"
   else
     tools/make_parquet_list.py --num_utts_per_parquet 1000 \
       --num_processes 10 \
       --instruct \
       --src_dir ${data_dir} \
       --des_dir ${data_dir}/parquet
+  fi
+  
+  # 将 data.list 中的相对路径转换为绝对路径
+  echo "Converting data.list to absolute paths..."
+  parquet_dir="${abs_data_dir}/parquet"
+  if [ -f "${parquet_dir}/data.list" ]; then
+    # 备份原文件
+    cp "${parquet_dir}/data.list" "${parquet_dir}/data.list.bak"
+    
+    # 检查是否已经是绝对路径
+    first_line=$(head -1 "${parquet_dir}/data.list")
+    if [[ "${first_line}" != /* ]]; then
+      # 转换为绝对路径
+      > "${parquet_dir}/data.list.new"
+      for tar_file in ${parquet_dir}/parquet_*.tar; do
+        echo "${tar_file}" >> "${parquet_dir}/data.list.new"
+      done
+      mv "${parquet_dir}/data.list.new" "${parquet_dir}/data.list"
+      echo "已转换为绝对路径"
+    else
+      echo "已经是绝对路径，跳过"
+    fi
+    
+    echo "data.list 内容:"
+    cat "${parquet_dir}/data.list"
   fi
 fi
 
