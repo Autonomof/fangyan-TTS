@@ -20,12 +20,12 @@ stage=0
 stop_stage=5
 
 # 数据目录 (相对于项目根目录)
-data_dir=../../../dataset/combined
+data_dir=../../../dataset
 # 预训练模型目录
 pretrained_model_dir=../../../pretrained_models/Fun-CosyVoice3-0.5B
 
 # 方言列表
-dialects="hunan henan"
+dialects="combined"
 
 # 训练配置
 export CUDA_VISIBLE_DEVICES="0"
