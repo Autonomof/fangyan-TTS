@@ -1,17 +1,16 @@
 # coding=utf-8
 """
 方言TTS数据集生成脚本
-用于生成湖南话和河南话的TTS训练数据，供CosyVoice3微调使用
+用于生成多种方言（湖南话、河南话、粤语、天津话、川渝话、郑州话、湖南普通话、东北话、西安话、上海话、广西普通话）的TTS训练数据，供CosyVoice3微调使用
 
 功能：
-1. 读取并清洗aishell前2000行 + hunan.txt/henan.txt
+1. 读取并清洗aishell前2000行 + 各方言特色文本(如hunan.txt, cantonese.txt等)
 2. 调用火山引擎TTS API批量合成音频
 3. 输出Kaldi格式索引文件 (wav.scp, text, utt2spk, spk2utt)
 
 使用方法：
     python generate_dialect_dataset.py --mode all      # 生成全部数据
-    python generate_dialect_dataset.py --mode hunan    # 只生成湖南话
-    python generate_dialect_dataset.py --mode henan    # 只生成河南话
+    python generate_dialect_dataset.py --mode cantonese # 只生成粤语
     python generate_dialect_dataset.py --dry-run       # 只生成索引文件，不调用API
 
 作者: Antigravity AI Assistant
@@ -66,22 +65,79 @@ if not VOLCENGINE_CONFIG["appid"] or not VOLCENGINE_CONFIG["access_token"]:
     print("  VOLCENGINE_ACCESS_TOKEN=your_access_token")
     print("或参考 .env.example 文件")
 
-# 音色配置
-VOICE_TYPES = {
-    "hunan": "BV216_streaming",   # 长沙靓女
-    "henan": "BV214_streaming",   # 乡村企业家/河南话
-}
-
-# Speaker ID 配置
-SPEAKER_IDS = {
-    "hunan": "speaker_hunan",
-    "henan": "speaker_henan",
+# ==================== 方言配置 ====================
+# Key: 方言标识
+DIALECT_CONFIG = {
+    "hunan": {
+        "voice": "BV216_streaming",
+        "speaker": "speaker_hunan",
+        "text_file": "hunan.txt",
+        "desc": "湖南话(长沙靓女)"
+    },
+    "henan": {
+        "voice": "BV214_streaming",
+        "speaker": "speaker_henan",
+        "text_file": "henan.txt",
+        "desc": "河南话(乡村企业家)"
+    },
+    "cantonese": {
+        "voice": "BV026_streaming",
+        "speaker": "speaker_cantonese",
+        "text_file": "cantonese.txt",
+        "desc": "粤语"
+    },
+    "tianjin": {
+        "voice": "BV212_streaming",
+        "speaker": "speaker_tianjin",
+        "text_file": "tianjin.txt",
+        "desc": "天津话"
+    },
+    "sichuan": {
+        "voice": "BV019_streaming",
+        "speaker": "speaker_sichuan",
+        "text_file": "sichuan.txt",
+        "desc": "川渝话"
+    },
+    "zhengzhou": {
+        "voice": "BV214_streaming",
+        "speaker": "speaker_zhengzhou",
+        "text_file": "zhengzhou.txt",
+        "desc": "郑州话"
+    },
+    "hunan_pu": {
+        "voice": "BV226_streaming",
+        "speaker": "speaker_hunan_pu",
+        "text_file": "hunan_pu.txt",
+        "desc": "湖南普通话"
+    },
+    "dongbei": {
+        "voice": "BV021_streaming",
+        "speaker": "speaker_dongbei",
+        "text_file": "dongbei.txt",
+        "desc": "东北话"
+    },
+    "xian": {
+        "voice": "BV210_streaming",
+        "speaker": "speaker_xian",
+        "text_file": "xian.txt",
+        "desc": "西安话"
+    },
+    "shanghai": {
+        "voice": "BV217_streaming",
+        "speaker": "speaker_shanghai",
+        "text_file": "shanghai.txt",
+        "desc": "上海话"
+    },
+    "guangxi": {
+        "voice": "BV213_streaming",
+        "speaker": "speaker_guangxi",
+        "text_file": "guangxi.txt",
+        "desc": "广西普通话"
+    }
 }
 
 # 数据配置
 AISHELL_FILE = "aishell_transcript_v0.8.txt"
-HUNAN_FILE = "hunan.txt"
-HENAN_FILE = "henan.txt"
 AISHELL_COUNT = 2000  # 提取aishell前N条
 OUTPUT_DIR = "dataset"
 
@@ -177,8 +233,8 @@ def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
     准备完整数据集
     
     策略：
-    - aishell前1000条 + hunan.txt -> speaker_hunan (使用长沙话音色)
-    - aishell后1000条 + henan.txt -> speaker_henan (使用河南话音色)
+    - 将aishell数据均匀分配给所有启用的方言
+    - 每个方言加上自己特定的文本数据
     
     Args:
         base_dir: 基础目录
@@ -187,70 +243,65 @@ def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
         按方言分组的TextItem字典
     """
     aishell_path = os.path.join(base_dir, AISHELL_FILE)
-    hunan_path = os.path.join(base_dir, HUNAN_FILE)
-    henan_path = os.path.join(base_dir, HENAN_FILE)
     
-    # 加载数据
+    # 1. 加载AIShell基础数据
     aishell_texts = load_aishell_data(aishell_path, AISHELL_COUNT)
-    hunan_texts = load_dialect_data(hunan_path)
-    henan_texts = load_dialect_data(henan_path)
     
-    # 分割aishell数据
-    aishell_half = len(aishell_texts) // 2
-    aishell_for_hunan = aishell_texts[:aishell_half]
-    aishell_for_henan = aishell_texts[aishell_half:]
+    dataset = {}
+    dialects = list(DIALECT_CONFIG.keys())
     
-    dataset = {"hunan": [], "henan": []}
+    # 计算每个方言分到的AIShell数据量
+    if len(dialects) > 0:
+        chunk_size = len(aishell_texts) // len(dialects)
+    else:
+        chunk_size = 0
+        
+    logger.info(f"共有 {len(dialects)} 种方言，AIShell数据每份约 {chunk_size} 条")
     
-    # 构建湖南话数据集
-    idx = 0
-    for text in aishell_for_hunan:
-        item = TextItem(
-            utt_id=f"hunan_{idx:05d}",
-            text=text,
-            speaker_id=SPEAKER_IDS["hunan"],
-            voice_type=VOICE_TYPES["hunan"],
-            dialect="hunan"
-        )
-        dataset["hunan"].append(item)
-        idx += 1
-    
-    for text in hunan_texts:
-        item = TextItem(
-            utt_id=f"hunan_{idx:05d}",
-            text=text,
-            speaker_id=SPEAKER_IDS["hunan"],
-            voice_type=VOICE_TYPES["hunan"],
-            dialect="hunan"
-        )
-        dataset["hunan"].append(item)
-        idx += 1
-    
-    # 构建河南话数据集
-    idx = 0
-    for text in aishell_for_henan:
-        item = TextItem(
-            utt_id=f"henan_{idx:05d}",
-            text=text,
-            speaker_id=SPEAKER_IDS["henan"],
-            voice_type=VOICE_TYPES["henan"],
-            dialect="henan"
-        )
-        dataset["henan"].append(item)
-        idx += 1
-    
-    for text in henan_texts:
-        item = TextItem(
-            utt_id=f"henan_{idx:05d}",
-            text=text,
-            speaker_id=SPEAKER_IDS["henan"],
-            voice_type=VOICE_TYPES["henan"],
-            dialect="henan"
-        )
-        dataset["henan"].append(item)
-        idx += 1
-    
-    logger.info(f"数据集准备完成: 湖南话 {len(dataset['hunan'])} 条, 河南话 {len(dataset['henan'])} 条")
+    for i, dialect in enumerate(dialects):
+        dataset[dialect] = []
+        conf = DIALECT_CONFIG[dialect]
+        
+        idx = 0
+        
+        # A. 分配AIShell数据
+        start = i * chunk_size
+        # 最后一个方言拿走剩余所有数据
+        end = start + chunk_size if i < len(dialects) - 1 else len(aishell_texts)
+        subset_aishell = aishell_texts[start:end]
+        
+        for text in subset_aishell:
+            item = TextItem(
+                utt_id=f"{dialect}_{idx:05d}",
+                text=text,
+                speaker_id=conf["speaker"],
+                voice_type=conf["voice"],
+                dialect=dialect
+            )
+            dataset[dialect].append(item)
+            idx += 1
+            
+        # B. 加载方言特定数据
+        dialect_file = os.path.join(base_dir, conf["text_file"])
+        try:
+            d_texts = load_dialect_data(dialect_file)
+            for text in d_texts:
+                item = TextItem(
+                    utt_id=f"{dialect}_{idx:05d}",
+                    text=text,
+                    speaker_id=conf["speaker"],
+                    voice_type=conf["voice"],
+                    dialect=dialect
+                )
+                dataset[dialect].append(item)
+                idx += 1
+            logger.info(f"[{conf['desc']}] 加载特定数据 {len(d_texts)} 条")
+        except FileNotFoundError:
+            logger.warning(f"[{conf['desc']}] 未找到特定文本文件 {conf['text_file']}，仅使用基础数据")
+        except Exception as e:
+            logger.error(f"加载 {dialect_file} 出错: {e}")
+
+        logger.info(f"[{conf['desc']}] 总计 {len(dataset[dialect])} 条 (AIShell: {len(subset_aishell)})")
     
     return dataset
 
@@ -459,9 +510,9 @@ def main():
     parser = argparse.ArgumentParser(description="方言TTS数据集生成脚本")
     parser.add_argument(
         "--mode",
-        choices=["all", "hunan", "henan"],
+        choices=["all"] + list(DIALECT_CONFIG.keys()),
         default="all",
-        help="生成模式: all=全部, hunan=仅湖南话, henan=仅河南话"
+        help="生成模式: all=全部, 或指定某种方言 (如 hunan, cantonese 等)"
     )
     parser.add_argument(
         "--dry-run",
@@ -507,7 +558,7 @@ def main():
     # 确定要处理的方言
     dialects_to_process = []
     if args.mode == "all":
-        dialects_to_process = ["hunan", "henan"]
+        dialects_to_process = list(DIALECT_CONFIG.keys())
     else:
         dialects_to_process = [args.mode]
     
@@ -566,7 +617,8 @@ def main():
 
 5. 开始训练:
    # 合并data.list
-   cat dataset/hunan/parquet/data.list dataset/henan/parquet/data.list > dataset/train.data.list
+   # 合并data.list
+   cat dataset/*/parquet/data.list > dataset/train.data.list
    # 参考 CosyVoice/examples/libritts/cosyvoice3/run.sh 进行训练
 """)
 
