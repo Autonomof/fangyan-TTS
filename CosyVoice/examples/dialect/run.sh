@@ -14,6 +14,15 @@
 
 . ./path.sh || exit 1;
 
+# 显式设置 PYTHONPATH，确保 torchrun 子进程也能正确加载模块
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COSYVOICE_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+export PYTHONPATH="${COSYVOICE_ROOT}:${COSYVOICE_ROOT}/third_party/Matcha-TTS:${PYTHONPATH}"
+echo "PYTHONPATH=${PYTHONPATH}"
+
+# 验证模块可以导入
+python -c "from cosyvoice.dataset.dataset import Dataset; print('✓ cosyvoice.dataset OK')" || exit 1
+
 # ==================== 配置区 ====================
 
 stage=0
