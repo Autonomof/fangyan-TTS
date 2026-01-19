@@ -24,6 +24,7 @@ import time
 import uuid
 import base64
 import argparse
+import random
 import requests
 from pathlib import Path
 from typing import List, Tuple, Dict
@@ -138,7 +139,7 @@ DIALECT_CONFIG = {
 
 # 数据配置
 AISHELL_FILE = "aishell_transcript_v0.8.txt"
-AISHELL_COUNT = 2000  # 提取aishell前N条
+AISHELL_PER_DIALECT_COUNT = 5000  # 每个方言随机提取N条
 OUTPUT_DIR = "dataset"
 
 # API调用配置
@@ -185,7 +186,7 @@ def load_aishell_data(file_path: str, count: int) -> List[str]:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
-                if i >= count:
+                if count > 0 and i >= count:
                     break
                 line = line.strip()
                 if not line:
@@ -244,19 +245,14 @@ def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
     """
     aishell_path = os.path.join(base_dir, AISHELL_FILE)
     
-    # 1. 加载AIShell基础数据
-    aishell_texts = load_aishell_data(aishell_path, AISHELL_COUNT)
+    # 1. 加载AIShell全部数据
+    logger.info("正在加载并清洗完整的 AIShell 数据...")
+    aishell_texts = load_aishell_data(aishell_path, -1)
     
     dataset = {}
     dialects = list(DIALECT_CONFIG.keys())
     
-    # 计算每个方言分到的AIShell数据量
-    if len(dialects) > 0:
-        chunk_size = len(aishell_texts) // len(dialects)
-    else:
-        chunk_size = 0
-        
-    logger.info(f"共有 {len(dialects)} 种方言，AIShell数据每份约 {chunk_size} 条")
+    logger.info(f"共有 {len(dialects)} 种方言，将为每种方言随机抽取 {AISHELL_PER_DIALECT_COUNT} 条数据")
     
     for i, dialect in enumerate(dialects):
         dataset[dialect] = []
@@ -264,11 +260,13 @@ def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
         
         idx = 0
         
-        # A. 分配AIShell数据
-        start = i * chunk_size
-        # 最后一个方言拿走剩余所有数据
-        end = start + chunk_size if i < len(dialects) - 1 else len(aishell_texts)
-        subset_aishell = aishell_texts[start:end]
+        # A. 分配AIShell数据 (随机采样)
+        # 即使数据不够，也取最大可能数量
+        sample_count = min(len(aishell_texts), AISHELL_PER_DIALECT_COUNT)
+        if sample_count < AISHELL_PER_DIALECT_COUNT:
+            logger.warning(f"AIShell数据总量 ({len(aishell_texts)}) 不足 {AISHELL_PER_DIALECT_COUNT} 条，将使用全部数据")
+        
+        subset_aishell = random.sample(aishell_texts, sample_count)
         
         for text in subset_aishell:
             item = TextItem(

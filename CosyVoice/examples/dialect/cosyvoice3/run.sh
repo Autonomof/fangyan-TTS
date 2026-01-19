@@ -99,8 +99,58 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     echo "Notice deepspeed has its own optimizer config. Modify conf/ds_stage2.json if necessary"
   fi
   
-  # 使用 combined 目录的 parquet
-  train_list=${data_dir}/parquet/data.list
+  # 获取数据目录的绝对路径
+  abs_data_dir=$(cd "${data_dir}" && pwd)
+  parquet_dir="${abs_data_dir}/parquet"
+  
+  # 自动分割训练集和验证集
+  # 将最后 1 个 parquet 文件作为验证集，其余作为训练集
+  train_list="${parquet_dir}/train.data.list"
+  cv_list="${parquet_dir}/cv.data.list"
+  
+  if [ ! -f "${train_list}" ] || [ ! -f "${cv_list}" ]; then
+    echo "分割训练集和验证集..."
+    
+    # 读取所有 parquet 文件
+    all_parquets=($(cat "${parquet_dir}/data.list"))
+    total_count=${#all_parquets[@]}
+    
+    if [ ${total_count} -le 1 ]; then
+      # 只有 1 个文件，训练和验证用同一个
+      echo "只有 ${total_count} 个 parquet 文件，训练和验证使用相同数据"
+      cp "${parquet_dir}/data.list" "${train_list}"
+      cp "${parquet_dir}/data.list" "${cv_list}"
+    else
+      # 最后 1 个作为验证集
+      cv_count=1
+      train_count=$((total_count - cv_count))
+      
+      echo "总共 ${total_count} 个 parquet 文件"
+      echo "训练集: ${train_count} 个"
+      echo "验证集: ${cv_count} 个"
+      
+      # 写入训练集列表
+      > "${train_list}"
+      for ((i=0; i<train_count; i++)); do
+        echo "${all_parquets[$i]}" >> "${train_list}"
+      done
+      
+      # 写入验证集列表
+      > "${cv_list}"
+      for ((i=train_count; i<total_count; i++)); do
+        echo "${all_parquets[$i]}" >> "${cv_list}"
+      done
+    fi
+    
+    echo ""
+    echo "训练集 (${train_list}):"
+    cat "${train_list}"
+    echo ""
+    echo "验证集 (${cv_list}):"
+    cat "${cv_list}"
+  else
+    echo "训练/验证集分割文件已存在"
+  fi
   
   for model in llm; do
     torchrun --nnodes=1 --nproc_per_node=$num_gpus \
@@ -109,7 +159,7 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
       --train_engine $train_engine \
       --config conf/cosyvoice3.yaml \
       --train_data ${train_list} \
-      --cv_data ${train_list} \
+      --cv_data ${cv_list} \
       --qwen_pretrain_path ${pretrained_model_dir}/CosyVoice-BlankEN \
       --model $model \
       --checkpoint ${pretrained_model_dir}/${model}.pt \
