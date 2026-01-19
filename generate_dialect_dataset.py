@@ -229,7 +229,7 @@ def load_dialect_data(file_path: str) -> List[str]:
     return texts
 
 
-def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
+def prepare_dataset(base_dir: str, input_dir: str) -> Dict[str, List[TextItem]]:
     """
     准备完整数据集
     
@@ -238,15 +238,20 @@ def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
     - 每个方言加上自己特定的文本数据
     
     Args:
-        base_dir: 基础目录
+        base_dir: 基础目录（脚本所在目录，用于fallback）
+        input_dir: 输入目录（包含方言文本）
     
     Returns:
         按方言分组的TextItem字典
     """
-    aishell_path = os.path.join(base_dir, AISHELL_FILE)
+    # AIShell文件查找逻辑：先在输入目录找，再在脚本目录找
+    aishell_path = os.path.join(input_dir, AISHELL_FILE)
+    if not os.path.exists(aishell_path):
+        logger.info(f"在输入目录未找到 {AISHELL_FILE}，尝试在脚本目录查找...")
+        aishell_path = os.path.join(base_dir, AISHELL_FILE)
     
     # 1. 加载AIShell全部数据
-    logger.info("正在加载并清洗完整的 AIShell 数据...")
+    logger.info(f"正在加载并清洗完整的 AIShell 数据 ({aishell_path})...")
     aishell_texts = load_aishell_data(aishell_path, -1)
     
     dataset = {}
@@ -280,7 +285,8 @@ def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
             idx += 1
             
         # B. 加载方言特定数据
-        dialect_file = os.path.join(base_dir, conf["text_file"])
+        # 始终优先从 input_dir 加载方言文本
+        dialect_file = os.path.join(input_dir, conf["text_file"])
         try:
             d_texts = load_dialect_data(dialect_file)
             for text in d_texts:
@@ -295,7 +301,27 @@ def prepare_dataset(base_dir: str) -> Dict[str, List[TextItem]]:
                 idx += 1
             logger.info(f"[{conf['desc']}] 加载特定数据 {len(d_texts)} 条")
         except FileNotFoundError:
-            logger.warning(f"[{conf['desc']}] 未找到特定文本文件 {conf['text_file']}，仅使用基础数据")
+            # 兼容性尝试：如果在 input_dir 找不到，尝试在 base_dir 找
+            backup_file = os.path.join(base_dir, conf["text_file"])
+            if os.path.exists(backup_file):
+                logger.warning(f"[{conf['desc']}] {conf['text_file']} 不在输入目录，但在脚本目录找到了，正在加载...")
+                try:
+                    d_texts = load_dialect_data(backup_file)
+                    for text in d_texts:
+                        item = TextItem(
+                            utt_id=f"{dialect}_{idx:05d}",
+                            text=text,
+                            speaker_id=conf["speaker"],
+                            voice_type=conf["voice"],
+                            dialect=dialect
+                        )
+                        dataset[dialect].append(item)
+                        idx += 1
+                    logger.info(f"[{conf['desc']}] 加载特定数据 {len(d_texts)} 条 (从备份位置)")
+                except Exception as e:
+                     logger.error(f"加载 {backup_file} 出错: {e}")
+            else:
+                logger.warning(f"[{conf['desc']}] 未找到特定文本文件 {conf['text_file']} (查找路径: {dialect_file})，仅使用基础数据")
         except Exception as e:
             logger.error(f"加载 {dialect_file} 出错: {e}")
 
@@ -523,6 +549,11 @@ def main():
         help=f"输出目录 (默认: {OUTPUT_DIR})"
     )
     parser.add_argument(
+        "--input-dir",
+        default="fangyan_text_dataset",
+        help="输入目录，包含方言文本文件 (默认: fangyan_text_dataset)"
+    )
+    parser.add_argument(
         "--qps",
         type=int,
         default=QPS_LIMIT,
@@ -535,20 +566,36 @@ def main():
     
     # 获取脚本所在目录
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    output_dir = os.path.join(script_dir, args.output_dir)
+    output_dir = args.output_dir # 支持相对或绝对路径，如果是相对路径则相对于CWD，这里不做特殊处理，直接使用用户输入
+    # 为了兼容性，如果用户输入的是相对路径，我们建议相对于执行目录。
+    # 原代码逻辑是 output_dir = os.path.join(script_dir, args.output_dir)，这里改为直接使用，更灵活，或者保持原样。
+    # 用户请求是 "支持指定输入输出文件夹"，通常意味着相对于当前工作目录。
+    # 但为了保持一致性，如果原代码是相对于脚本目录，我们先保持，或者改为相对于CWD。
+    # 一般CLI工具路径参数是相对于CWD。
+    # 让我们修改为相对于CWD (直接使用 args.output_dir 和 args.input_dir)，但如果用户没有提供，默认值需要在脚本目录下找吗？
+    # 默认值 "fangyan_text_dataset" 是相对路径。
+    
+    # 修正路径逻辑：
+    # input_dir 和 output_dir 如果是相对路径，则解释为相对于当前工作目录（执行脚本的目录）。
+    # 但是，为了确保脚本在任何地方运行都能找到默认文件（如果它们还在项目里），
+    # 我们可以保留原来的 script_dir 拼接逻辑作为 fallback，或者简单地使用 os.path.abspath。
+    
+    input_dir = args.input_dir
+    output_dir = args.output_dir
     
     logger.info("=" * 60)
     logger.info("方言TTS数据集生成脚本")
     logger.info("=" * 60)
     logger.info(f"模式: {args.mode}")
     logger.info(f"Dry Run: {args.dry_run}")
+    logger.info(f"输入目录: {input_dir}")
     logger.info(f"输出目录: {output_dir}")
     logger.info(f"QPS限制: {qps_limit}")
     logger.info("=" * 60)
     
     # 准备数据集
     try:
-        dataset = prepare_dataset(script_dir)
+        dataset = prepare_dataset(script_dir, input_dir)
     except FileNotFoundError:
         logger.error("数据文件加载失败，请检查文件路径")
         sys.exit(1)
