@@ -350,7 +350,7 @@ def synthesize_single(item: TextItem, output_dir: str) -> Tuple[bool, str]:
     
     # 如果已存在则跳过
     if os.path.exists(output_path):
-        return True, output_path
+        return True, "SKIPPED"
     
     # 构建请求
     header = {"Authorization": f"Bearer;{VOLCENGINE_CONFIG['access_token']}"}
@@ -437,11 +437,13 @@ def synthesize_batch(items: List[TextItem], output_dir: str, qps_limit: int = QP
     success_count = 0
     fail_count = 0
     failed_items = []
+    skipped_count = 0
     
     total = len(items)
     interval = 1.0 / qps_limit  # 请求间隔
     
     logger.info(f"开始合成 {total} 条音频, QPS限制: {qps_limit}")
+    print(f"进度: 0/{total} [0%]", end='\r')
     
     for i, item in enumerate(items):
         start_time = time.time()
@@ -450,17 +452,30 @@ def synthesize_batch(items: List[TextItem], output_dir: str, qps_limit: int = QP
         
         if success:
             success_count += 1
-            if (i + 1) % 50 == 0:
-                logger.info(f"进度: {i + 1}/{total} ({(i + 1) * 100 // total}%), 成功: {success_count}, 失败: {fail_count}")
+            if result == "SKIPPED":
+                skipped_count += 1
         else:
             fail_count += 1
             failed_items.append((item.utt_id, item.text[:30], result))
-            logger.error(f"[{item.utt_id}] 合成失败: {result}")
+            # logger.error(f"[{item.utt_id}] 合成失败: {result}") # 失败时打印日志会打断进度条，改为最后汇总或仅在严重错误时打印
+
+        # 进度条逻辑
+        percent = (i + 1) * 100 // total
+        bar_len = 30
+        filled_len = int(bar_len * (i + 1) / total)
+        bar = '=' * filled_len + '-' * (bar_len - filled_len)
         
-        # 限流
-        elapsed = time.time() - start_time
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
+        # 使用 sys.stdout 刷新
+        sys.stdout.write(f"\r[{bar}] {percent}% | {i + 1}/{total} [OK: {success_count - skipped_count}, Skip: {skipped_count}, Fail: {fail_count}]")
+        sys.stdout.flush()
+        
+        # 限流 (如果是跳过的不需要限流)
+        if result != "SKIPPED":
+            elapsed = time.time() - start_time
+            if elapsed < interval:
+                time.sleep(interval - elapsed)
+
+    print() # 换行
     
     # 输出失败列表
     if failed_items:
