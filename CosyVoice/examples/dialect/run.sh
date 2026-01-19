@@ -20,7 +20,7 @@ stage=0
 stop_stage=5
 
 # 数据目录 (相对于项目根目录)
-data_dir=../../../dataset
+data_dir=../../../dataset/combined
 # 预训练模型目录
 pretrained_model_dir=../../../pretrained_models/Fun-CosyVoice3-0.5B
 
