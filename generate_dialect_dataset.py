@@ -143,7 +143,7 @@ AISHELL_PER_DIALECT_COUNT = 5000  # 每个方言随机提取N条
 OUTPUT_DIR = "dataset"
 
 # API调用配置
-QPS_LIMIT = 2           # 每秒请求数限制
+QPS_LIMIT = 10          # 每秒请求数限制 (默认保守值，如拥有更高配额可调整)
 MAX_RETRIES = 3         # 最大重试次数
 RETRY_DELAY = 2         # 重试间隔（秒）
 REQUEST_TIMEOUT = 30    # 请求超时（秒）
