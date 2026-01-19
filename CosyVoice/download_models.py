@@ -8,10 +8,6 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 models = {
     'FunAudioLLM/Fun-CosyVoice3-0.5B-2512': 'pretrained_models/Fun-CosyVoice3-0.5B',
     'FunAudioLLM/CosyVoice2-0.5B': 'pretrained_models/CosyVoice2-0.5B',
-    'FunAudioLLM/CosyVoice-300M': 'pretrained_models/CosyVoice-300M',
-    'FunAudioLLM/CosyVoice-300M-SFT': 'pretrained_models/CosyVoice-300M-SFT',
-    'FunAudioLLM/CosyVoice-300M-Instruct': 'pretrained_models/CosyVoice-300M-Instruct',
-    'FunAudioLLM/CosyVoice-ttsfrd': 'pretrained_models/CosyVoice-ttsfrd'
 }
 
 # 3. 循环下载
