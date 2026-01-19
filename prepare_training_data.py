@@ -3,15 +3,15 @@
 方言训练数据准备脚本
 
 功能：
-1. 生成 instruct 文件（CosyVoice3 需要）
-2. 将 MP3 转换为 WAV（16kHz mono）
-3. 更新 wav.scp 指向 WAV 文件
+1. 生成 instruct 文件（CosyVoice3 需要，使用中文指令）
+2. 将 MP3 转换为 WAV（16kHz mono）【可选】
+3. 合并所有方言数据到一个文件夹，方便统一训练
 4. 验证数据完整性
 
 使用方法：
     python prepare_training_data.py --mode all        # 完整准备
     python prepare_training_data.py --mode instruct   # 只生成 instruct
-    python prepare_training_data.py --mode convert    # 只转换音频
+    python prepare_training_data.py --mode combine    # 只合并数据
     python prepare_training_data.py --mode validate   # 验证数据
 
 作者: Antigravity AI Assistant
@@ -24,20 +24,63 @@ import argparse
 import subprocess
 import shutil
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 # 配置
 DATASET_DIR = "dataset"
-DIALECTS = ["hunan", "henan"]
+COMBINED_DIR = "combined"  # 合并后的目录名
 SAMPLE_RATE = 16000
 
-# 方言指令配置
+# 方言指令配置（中文）
 INSTRUCT_TEMPLATES = {
-    "hunan": "Please speak in Hunanese dialect (Changsha accent).<|endofprompt|>",
-    "henan": "Please speak in Henanese dialect (Henan accent).<|endofprompt|>",
-    "default": "You are a helpful assistant.<|endofprompt|>"
+    # 北方方言
+    "dongbei": "请用东北话说。<|endofprompt|>",
+    "tianjin": "请用天津话说。<|endofprompt|>",
+    "xian": "请用西安话说。<|endofprompt|>",
+    "henan": "请用河南话说。<|endofprompt|>",
+    "zhengzhou": "请用郑州话说。<|endofprompt|>",
+    
+    # 西南官话
+    "sichuan": "请用四川话说。<|endofprompt|>",
+    "chuanyu": "请用川渝方言说。<|endofprompt|>",
+    "chongqing": "请用重庆话说。<|endofprompt|>",
+    
+    # 湘语
+    "hunan": "请用湖南话说。<|endofprompt|>",
+    "changsha": "请用长沙话说。<|endofprompt|>",
+    "hunan_pu": "请用湖南普通话说。<|endofprompt|>",
+    
+    # 粤语
+    "cantonese": "请用粤语说。<|endofprompt|>",
+    "yueyu": "请用粤语说。<|endofprompt|>",
+    "guangxi": "请用广西话说。<|endofprompt|>",
+    
+    # 吴语
+    "shanghai": "请用上海话说。<|endofprompt|>",
+    
+    # 默认
+    "default": "请用方言说。<|endofprompt|>"
+}
+
+# 方言中文名称映射
+DIALECT_NAMES = {
+    "dongbei": "东北话",
+    "tianjin": "天津话",
+    "xian": "西安话",
+    "henan": "河南话",
+    "zhengzhou": "郑州话",
+    "sichuan": "四川话",
+    "chuanyu": "川渝方言",
+    "chongqing": "重庆话",
+    "hunan": "湖南话",
+    "changsha": "长沙话",
+    "hunan_pu": "湖南普通话",
+    "cantonese": "粤语",
+    "yueyu": "粤语",
+    "guangxi": "广西话",
+    "shanghai": "上海话",
 }
 
 
@@ -48,22 +91,22 @@ def check_ffmpeg() -> bool:
 
 def convert_single_audio(args: Tuple[str, str]) -> Tuple[bool, str]:
     """转换单个音频文件"""
-    mp3_path, wav_path = args
+    src_path, dst_path = args
     
-    if os.path.exists(wav_path):
-        return True, wav_path
+    if os.path.exists(dst_path):
+        return True, dst_path
     
     try:
         result = subprocess.run([
-            "ffmpeg", "-y", "-i", mp3_path,
+            "ffmpeg", "-y", "-i", src_path,
             "-ar", str(SAMPLE_RATE),
             "-ac", "1",
             "-acodec", "pcm_s16le",
-            wav_path
+            dst_path
         ], capture_output=True, timeout=30)
         
         if result.returncode == 0:
-            return True, wav_path
+            return True, dst_path
         else:
             return False, f"FFmpeg error: {result.stderr.decode()[:100]}"
     except Exception as e:
@@ -71,7 +114,7 @@ def convert_single_audio(args: Tuple[str, str]) -> Tuple[bool, str]:
 
 
 def generate_instruct_file(data_dir: Path, dialect: str) -> int:
-    """生成 instruct 文件"""
+    """生成 instruct 文件（中文指令）"""
     text_file = data_dir / "text"
     instruct_file = data_dir / "instruct"
     
@@ -80,6 +123,7 @@ def generate_instruct_file(data_dir: Path, dialect: str) -> int:
         return 0
     
     instruct_text = INSTRUCT_TEMPLATES.get(dialect, INSTRUCT_TEMPLATES["default"])
+    dialect_name = DIALECT_NAMES.get(dialect, dialect)
     
     count = 0
     with open(text_file, 'r', encoding='utf-8') as f_in, \
@@ -91,32 +135,129 @@ def generate_instruct_file(data_dir: Path, dialect: str) -> int:
                 f_out.write(f"{utt_id} {instruct_text}\n")
                 count += 1
     
-    print(f"  ✅ 生成 {instruct_file}, 共 {count} 条")
+    print(f"  ✅ 生成 instruct: {count} 条 (指令: {instruct_text[:20]}...)")
     return count
+
+
+def combine_dialect_data(dataset_dir: Path, dialects: List[str], combined_dir: Path) -> Dict[str, int]:
+    """
+    合并所有方言数据到一个文件夹
+    
+    生成的文件:
+    - wav.scp: 合并的音频路径索引
+    - text: 合并的文本
+    - utt2spk: 语音到说话人映射
+    - spk2utt: 说话人到语音映射
+    - instruct: 合并的指令
+    """
+    print(f"\n📦 合并方言数据到: {combined_dir}")
+    
+    # 创建合并目录
+    combined_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 初始化合并文件
+    files_to_merge = ["wav.scp", "text", "utt2spk", "instruct"]
+    merged_data = {f: [] for f in files_to_merge}
+    spk2utt_data = {}  # 需要特殊处理
+    
+    stats = {
+        "total_utts": 0,
+        "total_speakers": 0,
+        "dialects_processed": 0
+    }
+    
+    for dialect in dialects:
+        data_dir = dataset_dir / dialect
+        
+        if not data_dir.exists():
+            print(f"  ⚠️ 跳过不存在的目录: {dialect}")
+            continue
+        
+        # 检查必需文件
+        if not (data_dir / "text").exists():
+            print(f"  ⚠️ 跳过 {dialect}: 缺少 text 文件")
+            continue
+        
+        print(f"  📂 处理 {dialect}...")
+        dialect_utt_count = 0
+        
+        for filename in files_to_merge:
+            file_path = data_dir / filename
+            if file_path.exists():
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            merged_data[filename].append(line)
+                            if filename == "text":
+                                dialect_utt_count += 1
+        
+        # 处理 spk2utt
+        spk2utt_file = data_dir / "spk2utt"
+        if spk2utt_file.exists():
+            with open(spk2utt_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        spk = parts[0]
+                        utts = parts[1:]
+                        if spk not in spk2utt_data:
+                            spk2utt_data[spk] = []
+                        spk2utt_data[spk].extend(utts)
+        
+        stats["total_utts"] += dialect_utt_count
+        stats["dialects_processed"] += 1
+        print(f"     语音数: {dialect_utt_count}")
+    
+    # 写入合并文件
+    print("\n  📝 写入合并文件...")
+    
+    for filename, lines in merged_data.items():
+        if lines:
+            output_file = combined_dir / filename
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+            print(f"     {filename}: {len(lines)} 行")
+    
+    # 写入 spk2utt
+    if spk2utt_data:
+        spk2utt_file = combined_dir / "spk2utt"
+        with open(spk2utt_file, 'w', encoding='utf-8') as f:
+            for spk, utts in spk2utt_data.items():
+                f.write(f"{spk} {' '.join(utts)}\n")
+        stats["total_speakers"] = len(spk2utt_data)
+        print(f"     spk2utt: {len(spk2utt_data)} 个说话人")
+    
+    print(f"\n  ✅ 合并完成!")
+    print(f"     方言数: {stats['dialects_processed']}")
+    print(f"     语音总数: {stats['total_utts']}")
+    print(f"     说话人数: {stats['total_speakers']}")
+    
+    return stats
 
 
 def convert_audio_files(data_dir: Path, num_workers: int = 4) -> Tuple[int, int]:
     """将 MP3 转换为 WAV"""
     wav_scp = data_dir / "wav.scp"
-    wavs_dir = data_dir / "wavs"
     
     if not wav_scp.exists():
         print(f"  ❌ 错误: {wav_scp} 不存在")
         return 0, 0
     
     # 读取 wav.scp
-    mp3_files = []
+    audio_files = []
     with open(wav_scp, 'r', encoding='utf-8') as f:
         for line in f:
             parts = line.strip().split()
             if len(parts) >= 2:
                 utt_id = parts[0]
-                mp3_path = parts[1]
-                wav_path = mp3_path.replace('.mp3', '.wav')
-                mp3_files.append((mp3_path, wav_path))
+                src_path = parts[1]
+                if src_path.endswith('.mp3'):
+                    wav_path = src_path.replace('.mp3', '.wav')
+                    audio_files.append((src_path, wav_path))
     
-    if not mp3_files:
-        print("  ⚠️ 没有找到 MP3 文件")
+    if not audio_files:
+        print("  ⚠️ 没有需要转换的 MP3 文件")
         return 0, 0
     
     # 并行转换
@@ -124,7 +265,7 @@ def convert_audio_files(data_dir: Path, num_workers: int = 4) -> Tuple[int, int]
     fail_count = 0
     
     with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(convert_single_audio, args): args for args in mp3_files}
+        futures = {executor.submit(convert_single_audio, args): args for args in audio_files}
         
         for future in tqdm(as_completed(futures), total=len(futures), desc="  转换进度"):
             success, result = future.result()
@@ -137,7 +278,7 @@ def convert_audio_files(data_dir: Path, num_workers: int = 4) -> Tuple[int, int]
     
     # 更新 wav.scp
     if success_count > 0:
-        wav_scp_new = data_dir / "wav.scp.wav"
+        wav_scp_new = data_dir / "wav.scp.new"
         with open(wav_scp, 'r', encoding='utf-8') as f_in, \
              open(wav_scp_new, 'w', encoding='utf-8') as f_out:
             for line in f_in:
@@ -148,7 +289,7 @@ def convert_audio_files(data_dir: Path, num_workers: int = 4) -> Tuple[int, int]
                     f_out.write(f"{utt_id} {wav_path}\n")
         
         # 备份原文件并替换
-        wav_scp_bak = data_dir / "wav.scp.mp3.bak"
+        wav_scp_bak = data_dir / "wav.scp.bak"
         if not wav_scp_bak.exists():
             shutil.copy(wav_scp, wav_scp_bak)
         shutil.move(wav_scp_new, wav_scp)
@@ -157,76 +298,60 @@ def convert_audio_files(data_dir: Path, num_workers: int = 4) -> Tuple[int, int]
     return success_count, fail_count
 
 
-def validate_data(data_dir: Path) -> Dict[str, bool]:
+def validate_data(data_dir: Path, name: str = "") -> Dict[str, any]:
     """验证数据完整性"""
-    required_files = [
-        "wav.scp",
-        "text",
-        "utt2spk",
-        "spk2utt"
-    ]
+    required_files = ["wav.scp", "text", "utt2spk", "spk2utt"]
+    optional_files = ["instruct", "utt2embedding.pt", "spk2embedding.pt", "utt2speech_token.pt"]
     
-    optional_files = [
-        "instruct",
-        "utt2embedding.pt",
-        "spk2embedding.pt",
-        "utt2speech_token.pt"
-    ]
+    result = {"name": name, "valid": True}
     
-    result = {}
+    print(f"\n  📁 {name or data_dir.name}")
+    print(f"  必需文件:")
     
-    print(f"\n  必需文件:")
     for f in required_files:
         exists = (data_dir / f).exists()
         result[f] = exists
+        if not exists:
+            result["valid"] = False
         status = "✅" if exists else "❌"
-        print(f"    {status} {f}")
+        
+        # 统计行数
+        if exists:
+            with open(data_dir / f, 'r', encoding='utf-8') as file:
+                line_count = sum(1 for _ in file)
+            print(f"    {status} {f} ({line_count} 行)")
+        else:
+            print(f"    {status} {f}")
     
-    print(f"\n  可选文件:")
+    print(f"  可选文件:")
     for f in optional_files:
         exists = (data_dir / f).exists()
         result[f] = exists
         status = "✅" if exists else "⚪"
         print(f"    {status} {f}")
     
-    # 检查 wavs 目录
-    wavs_dir = data_dir / "wavs"
-    if wavs_dir.exists():
-        mp3_count = len(list(wavs_dir.glob("*.mp3")))
-        wav_count = len(list(wavs_dir.glob("*.wav")))
-        print(f"\n  音频文件:")
-        print(f"    MP3: {mp3_count} 个")
-        print(f"    WAV: {wav_count} 个")
-        result["wavs_mp3"] = mp3_count
-        result["wavs_wav"] = wav_count
-    else:
-        print(f"\n  ⚠️ wavs 目录不存在")
-        result["wavs_mp3"] = 0
-        result["wavs_wav"] = 0
-    
-    # 检查 parquet 目录
-    parquet_dir = data_dir / "parquet"
-    if parquet_dir.exists():
-        parquet_count = len(list(parquet_dir.glob("*.tar")))
-        data_list = parquet_dir / "data.list"
-        print(f"\n  Parquet 数据:")
-        print(f"    Parquet 文件: {parquet_count} 个")
-        print(f"    data.list: {'✅' if data_list.exists() else '❌'}")
-        result["parquet_count"] = parquet_count
-        result["data_list"] = data_list.exists()
-    else:
-        print(f"\n  ⚪ parquet 目录不存在 (需要运行 make_parquet_list.py)")
-    
     return result
+
+
+def get_all_dialects(dataset_dir: Path) -> List[str]:
+    """获取所有方言目录"""
+    dialects = []
+    if dataset_dir.exists():
+        for item in dataset_dir.iterdir():
+            if item.is_dir() and not item.name.startswith('.') and item.name != COMBINED_DIR:
+                # 检查是否包含 text 文件
+                if (item / "text").exists():
+                    dialects.append(item.name)
+    return sorted(dialects)
 
 
 def main():
     parser = argparse.ArgumentParser(description="方言训练数据准备脚本")
     parser.add_argument(
         "--mode",
-        choices=["all", "instruct", "convert", "validate"],
+        choices=["all", "instruct", "combine", "convert", "validate"],
         default="all",
-        help="运行模式: all=完整准备, instruct=只生成instruct, convert=只转换音频, validate=验证数据"
+        help="运行模式: all=完整准备, instruct=生成instruct, combine=合并数据, convert=转换音频, validate=验证"
     )
     parser.add_argument(
         "--dataset-dir",
@@ -235,9 +360,14 @@ def main():
     )
     parser.add_argument(
         "--dialects",
-        nargs="+",
-        default=DIALECTS,
-        help=f"方言列表 (默认: {' '.join(DIALECTS)})"
+        nargs="*",
+        default=None,
+        help="方言列表，留空则自动检测所有方言"
+    )
+    parser.add_argument(
+        "--combined-name",
+        default=COMBINED_DIR,
+        help=f"合并目录名 (默认: {COMBINED_DIR})"
     )
     parser.add_argument(
         "--workers",
@@ -245,73 +375,115 @@ def main():
         default=4,
         help="音频转换并行数 (默认: 4)"
     )
+    parser.add_argument(
+        "--no-convert",
+        action="store_true",
+        help="跳过音频格式转换（直接使用 MP3）"
+    )
     
     args = parser.parse_args()
     
     script_dir = Path(__file__).parent
     dataset_dir = script_dir / args.dataset_dir
+    combined_dir = dataset_dir / args.combined_name
+    
+    # 自动检测方言
+    if args.dialects is None or len(args.dialects) == 0:
+        dialects = get_all_dialects(dataset_dir)
+    else:
+        dialects = args.dialects
     
     print("=" * 60)
-    print("方言训练数据准备脚本")
+    print("🗣️  方言训练数据准备脚本 v2.0")
     print("=" * 60)
     print(f"模式: {args.mode}")
     print(f"数据集目录: {dataset_dir}")
-    print(f"方言: {', '.join(args.dialects)}")
+    print(f"检测到方言: {len(dialects)} 个")
+    for d in dialects:
+        name = DIALECT_NAMES.get(d, d)
+        print(f"  - {d} ({name})")
+    print(f"合并目录: {combined_dir}")
     print("=" * 60)
     
-    # 检查 ffmpeg
-    if args.mode in ["all", "convert"]:
-        if not check_ffmpeg():
-            print("\n❌ 错误: 未找到 ffmpeg，请先安装 ffmpeg")
-            print("  Windows: https://ffmpeg.org/download.html")
-            print("  Linux: sudo apt install ffmpeg")
-            print("  macOS: brew install ffmpeg")
-            sys.exit(1)
-        print("\n✅ ffmpeg 已安装")
+    if not dialects:
+        print("❌ 没有找到任何方言数据目录")
+        sys.exit(1)
     
-    # 处理每个方言
-    for dialect in args.dialects:
-        data_dir = dataset_dir / dialect
+    # ==================== 生成 instruct ====================
+    if args.mode in ["all", "instruct"]:
+        print("\n" + "=" * 40)
+        print("📝 生成 instruct 文件（中文指令）")
+        print("=" * 40)
         
-        print(f"\n{'='*40}")
-        print(f"处理方言: {dialect.upper()}")
-        print(f"{'='*40}")
+        for dialect in dialects:
+            data_dir = dataset_dir / dialect
+            if data_dir.exists():
+                print(f"\n处理 {dialect} ({DIALECT_NAMES.get(dialect, dialect)}):")
+                generate_instruct_file(data_dir, dialect)
+    
+    # ==================== 音频转换 ====================
+    if args.mode in ["all", "convert"] and not args.no_convert:
+        print("\n" + "=" * 40)
+        print("🎵 转换音频文件 (MP3 -> WAV)")
+        print("=" * 40)
         
-        if not data_dir.exists():
-            print(f"❌ 目录不存在: {data_dir}")
-            continue
+        if not check_ffmpeg():
+            print("\n⚠️ 未找到 ffmpeg，跳过音频转换")
+            print("  如需转换，请安装 ffmpeg")
+        else:
+            for dialect in dialects:
+                data_dir = dataset_dir / dialect
+                if data_dir.exists():
+                    print(f"\n处理 {dialect}:")
+                    convert_audio_files(data_dir, args.workers)
+    
+    # ==================== 合并数据 ====================
+    if args.mode in ["all", "combine"]:
+        print("\n" + "=" * 40)
+        print("📦 合并所有方言数据")
+        print("=" * 40)
         
-        if args.mode in ["all", "instruct"]:
-            print("\n📝 生成 instruct 文件...")
-            generate_instruct_file(data_dir, dialect)
+        combine_dialect_data(dataset_dir, dialects, combined_dir)
+    
+    # ==================== 验证数据 ====================
+    if args.mode in ["all", "validate"]:
+        print("\n" + "=" * 40)
+        print("🔍 验证数据完整性")
+        print("=" * 40)
         
-        if args.mode in ["all", "convert"]:
-            print("\n🎵 转换音频文件 (MP3 -> WAV 16kHz)...")
-            convert_audio_files(data_dir, args.workers)
+        # 验证各方言
+        for dialect in dialects:
+            data_dir = dataset_dir / dialect
+            if data_dir.exists():
+                validate_data(data_dir, DIALECT_NAMES.get(dialect, dialect))
         
-        if args.mode in ["all", "validate"]:
-            print("\n🔍 验证数据完整性...")
-            validate_data(data_dir)
+        # 验证合并目录
+        if combined_dir.exists():
+            print("\n" + "-" * 30)
+            validate_data(combined_dir, "合并数据 (combined)")
     
     print("\n" + "=" * 60)
-    print("准备完成!")
+    print("✅ 准备完成!")
     print("=" * 60)
     
     if args.mode == "all":
-        print("""
+        print(f"""
 下一步操作:
-1. 提取 Speaker Embedding:
+
+1. 进入训练目录:
    cd CosyVoice/examples/dialect
-   bash run.sh  # stage=1
 
-2. 提取 Speech Token:
-   bash run.sh  # stage=2
+2. 修改 run.sh 中的数据目录指向合并数据:
+   data_dir=../../../dataset/{args.combined_name}
 
-3. 生成 Parquet:
-   bash run.sh  # stage=3
+3. 按阶段执行训练:
+   # Stage 1: 提取 Speaker Embedding
+   # Stage 2: 提取 Speech Token
+   # Stage 3: 生成 Parquet
+   # Stage 5: 训练模型
+   bash run.sh
 
-4. 开始训练:
-   bash run.sh  # stage=5
+合并数据位置: {combined_dir}
 """)
 
 
