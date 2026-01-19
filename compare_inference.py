@@ -128,8 +128,8 @@ def main():
     original_model = load_model(args.pretrained_dir)
     
     print("\n生成原始模型音频...")
-    for case in test_cases:
-        output_path = output_dir / f"original_{case['name']}.wav"
+    for i, case in enumerate(test_cases, 1):
+        output_path = output_dir / f"{case['name']}_{i}_original.wav"
         generate_audio(
             original_model, 
             case['text'], 
@@ -148,8 +148,8 @@ def main():
         finetuned_model = load_model(args.pretrained_dir, args.finetuned_llm)
         
         print("\n生成微调后模型音频...")
-        for case in test_cases:
-            output_path = output_dir / f"finetuned_{case['name']}.wav"
+        for i, case in enumerate(test_cases, 1):
+            output_path = output_dir / f"{case['name']}_{i}_finetuned.wav"
             generate_audio(
                 finetuned_model,
                 case['text'],
