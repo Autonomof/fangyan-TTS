@@ -155,7 +155,7 @@ DIALECT_CONFIG = {
 # 数据配置
 AISHELL_FILE = "aishell_transcript_v0.8.txt"
 AISHELL_PER_DIALECT_COUNT = 5000  # 每个方言随机提取N条
-OUTPUT_DIR = "dataset"
+OUTPUT_DIR = "dataset_new"
 
 # API调用配置
 QPS_LIMIT = 5           # 每秒请求数限制（2个API账号并行，总QPS=5）
