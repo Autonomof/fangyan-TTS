@@ -15,9 +15,6 @@
     python generate_dialect_dataset.py --dry-run       # 只生成索引文件，不调用API
     python generate_dialect_dataset.py --qps 10        # 指定全局QPS限制
 
-作者: Antigravity AI Assistant
-日期: 2026-01-16
-更新: 2026-01-20 (新增多API并行下载，QPS=5)
 """
 
 import os
@@ -154,7 +151,7 @@ DIALECT_CONFIG = {
 
 # 数据配置
 AISHELL_FILE = "aishell_transcript_v0.8.txt"
-AISHELL_PER_DIALECT_COUNT = 5000  # 每个方言随机提取N条
+AISHELL_PER_DIALECT_COUNT = 2000  # 每个方言随机提取N条
 OUTPUT_DIR = "dataset_new"
 
 # API调用配置
@@ -275,21 +272,55 @@ def load_dialect_data(file_path: str) -> List[str]:
     return texts
 
 
-def prepare_dataset(base_dir: str, input_dir: str) -> Dict[str, List[TextItem]]:
+def prepare_dataset(base_dir: str, input_dir: str, output_dir: str) -> Dict[str, List[TextItem]]:
     """
-    准备完整数据集
+    准备完整数据集（支持缓存，确保音频与文本一一对应）
     
     策略：
-    - 将aishell数据均匀分配给所有启用的方言
-    - 每个方言加上自己特定的文本数据
+    - 首次运行：随机采样并保存到缓存文件
+    - 后续运行：直接加载缓存，确保数据一致
     
     Args:
         base_dir: 基础目录（脚本所在目录，用于fallback）
         input_dir: 输入目录（包含方言文本）
+        output_dir: 输出目录（用于存放缓存文件）
     
     Returns:
         按方言分组的TextItem字典
     """
+    # 缓存文件路径
+    cache_file = os.path.join(output_dir, "dataset_cache.json")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 如果缓存存在，直接加载
+    if os.path.exists(cache_file):
+        logger.info(f"发现数据集缓存文件，正在加载: {cache_file}")
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+            
+            dataset = {}
+            for dialect, items_data in cache_data.items():
+                dataset[dialect] = [
+                    TextItem(
+                        utt_id=item['utt_id'],
+                        text=item['text'],
+                        speaker_id=item['speaker_id'],
+                        voice_type=item['voice_type'],
+                        dialect=item['dialect']
+                    )
+                    for item in items_data
+                ]
+                logger.info(f"[{dialect}] 从缓存加载 {len(dataset[dialect])} 条数据")
+            
+            logger.info(f"缓存加载完成，共 {sum(len(v) for v in dataset.values())} 条数据")
+            return dataset
+        except Exception as e:
+            logger.warning(f"缓存加载失败: {e}，将重新生成数据集")
+    
+    # === 首次运行：生成数据集 ===
+    logger.info("未发现缓存，正在生成新数据集...")
+    
     # AIShell文件查找逻辑：先在输入目录找，再在脚本目录找
     aishell_path = os.path.join(input_dir, AISHELL_FILE)
     if not os.path.exists(aishell_path):
@@ -372,6 +403,24 @@ def prepare_dataset(base_dir: str, input_dir: str) -> Dict[str, List[TextItem]]:
             logger.error(f"加载 {dialect_file} 出错: {e}")
 
         logger.info(f"[{conf['desc']}] 总计 {len(dataset[dialect])} 条 (AIShell: {len(subset_aishell)})")
+    
+    # === 保存缓存 ===
+    cache_data = {}
+    for dialect, items in dataset.items():
+        cache_data[dialect] = [
+            {
+                'utt_id': item.utt_id,
+                'text': item.text,
+                'speaker_id': item.speaker_id,
+                'voice_type': item.voice_type,
+                'dialect': item.dialect
+            }
+            for item in items
+        ]
+    
+    with open(cache_file, 'w', encoding='utf-8') as f:
+        json.dump(cache_data, f, ensure_ascii=False, indent=2)
+    logger.info(f"数据集缓存已保存: {cache_file}")
     
     return dataset
 
@@ -687,7 +736,7 @@ def main():
     
     # 准备数据集
     try:
-        dataset = prepare_dataset(script_dir, input_dir)
+        dataset = prepare_dataset(script_dir, input_dir, output_dir)
     except FileNotFoundError:
         logger.error("数据文件加载失败，请检查文件路径")
         sys.exit(1)
