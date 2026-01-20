@@ -38,6 +38,8 @@ env/
 
 # 生成的数据集（文件太大，只忽略根目录的 dataset）
 /dataset/
+/dataset_emotion/
+/ESD/
 *.mp3
 *.wav
 
