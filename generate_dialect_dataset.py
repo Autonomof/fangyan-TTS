@@ -5,16 +5,19 @@
 
 功能：
 1. 读取并清洗aishell前2000行 + 各方言特色文本(如hunan.txt, cantonese.txt等)
-2. 调用火山引擎TTS API批量合成音频
+2. 调用火山引擎TTS API批量合成音频（支持多API账号并行下载）
 3. 输出Kaldi格式索引文件 (wav.scp, text, utt2spk, spk2utt)
+4. 全局QPS限流，确保不超过配额限制
 
 使用方法：
     python generate_dialect_dataset.py --mode all      # 生成全部数据
     python generate_dialect_dataset.py --mode cantonese # 只生成粤语
     python generate_dialect_dataset.py --dry-run       # 只生成索引文件，不调用API
+    python generate_dialect_dataset.py --qps 10        # 指定全局QPS限制
 
 作者: Antigravity AI Assistant
 日期: 2026-01-16
+更新: 2026-01-20 (新增多API并行下载，QPS=5)
 """
 
 import os
@@ -31,6 +34,8 @@ from typing import List, Tuple, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import logging
+import threading
+from collections import deque
 
 # 加载 .env 配置
 try:
@@ -49,22 +54,32 @@ except ImportError:
 
 # ==================== 配置区 ====================
 
-# 火山引擎TTS API配置（从环境变量读取）
-VOLCENGINE_CONFIG = {
-    "appid": os.getenv("VOLCENGINE_APPID", ""),
-    "access_token": os.getenv("VOLCENGINE_ACCESS_TOKEN", ""),
-    "cluster": os.getenv("VOLCENGINE_CLUSTER", "volcano_tts"),
-    "host": "openspeech.bytedance.com",
-    "api_url": "https://openspeech.bytedance.com/api/v1/tts"
-}
+# 火山引擎TTS API配置（支持多个账号并行）
+VOLCENGINE_CONFIGS = [
+    {
+        "appid": "3973547294",
+        "access_token": "Hi3jj7YKmrW98s9iQ4ENV_s6FPKKTqVW",
+        "secret_key": "YhyQ2yQJFpYcftreyMBfHnqB8i1l3-mi",
+        "cluster": "volcano_tts",
+        "host": "openspeech.bytedance.com",
+        "api_url": "https://openspeech.bytedance.com/api/v1/tts"
+    },
+    {
+        "appid": "5299691531",
+        "access_token": "Y_0l4W0NyamDy61JtBh62w1HjkApOa0p",
+        "secret_key": "",
+        "cluster": "volcano_tts",
+        "host": "openspeech.bytedance.com",
+        "api_url": "https://openspeech.bytedance.com/api/v1/tts"
+    }
+]
 
 # 检查必要的配置
-if not VOLCENGINE_CONFIG["appid"] or not VOLCENGINE_CONFIG["access_token"]:
+if not VOLCENGINE_CONFIGS or not all(cfg.get("appid") and cfg.get("access_token") for cfg in VOLCENGINE_CONFIGS):
     print("警告: 未配置火山引擎 API 凭据！")
-    print("请创建 .env 文件并配置以下环境变量：")
-    print("  VOLCENGINE_APPID=your_appid")
-    print("  VOLCENGINE_ACCESS_TOKEN=your_access_token")
-    print("或参考 .env.example 文件")
+    print("请在代码中配置 VOLCENGINE_CONFIGS 列表")
+else:
+    print(f"已配置 {len(VOLCENGINE_CONFIGS)} 个API账号用于并行下载")
 
 # ==================== 方言配置 ====================
 # Key: 方言标识
@@ -143,7 +158,7 @@ AISHELL_PER_DIALECT_COUNT = 5000  # 每个方言随机提取N条
 OUTPUT_DIR = "dataset"
 
 # API调用配置
-QPS_LIMIT = 10          # 每秒请求数限制 (默认保守值，如拥有更高配额可调整)
+QPS_LIMIT = 5           # 每秒请求数限制（2个API账号并行，总QPS=5）
 MAX_RETRIES = 3         # 最大重试次数
 RETRY_DELAY = 2         # 重试间隔（秒）
 REQUEST_TIMEOUT = 30    # 请求超时（秒）
@@ -167,6 +182,37 @@ class TextItem:
     speaker_id: str     # 说话人ID
     voice_type: str     # TTS音色
     dialect: str        # 方言类型 (hunan/henan)
+
+
+# ==================== 全局限流器 ====================
+
+class GlobalRateLimiter:
+    """全局QPS限流器（支持多线程）"""
+    def __init__(self, qps: int):
+        self.qps = qps
+        self.timestamps = deque()
+        self.lock = threading.Lock()
+    
+    def acquire(self):
+        """获取请求许可，如需等待则自动sleep"""
+        with self.lock:
+            now = time.time()
+            # 清理1秒前的时间戳
+            while self.timestamps and self.timestamps[0] < now - 1.0:
+                self.timestamps.popleft()
+            
+            # 如果1秒内已有qps个请求，计算需等待时间
+            if len(self.timestamps) >= self.qps:
+                sleep_time = 1.0 - (now - self.timestamps[0])
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    now = time.time()
+                    # 重新清理
+                    while self.timestamps and self.timestamps[0] < now - 1.0:
+                        self.timestamps.popleft()
+            
+            # 记录本次请求
+            self.timestamps.append(now)
 
 
 # ==================== 数据加载函数 ====================
@@ -332,13 +378,15 @@ def prepare_dataset(base_dir: str, input_dir: str) -> Dict[str, List[TextItem]]:
 
 # ==================== TTS合成函数 ====================
 
-def synthesize_single(item: TextItem, output_dir: str) -> Tuple[bool, str]:
+def synthesize_single(item: TextItem, output_dir: str, api_config: dict, rate_limiter: GlobalRateLimiter = None) -> Tuple[bool, str]:
     """
     合成单条音频
     
     Args:
         item: TextItem对象
         output_dir: 输出目录
+        api_config: API配置字典
+        rate_limiter: 全局限流器
     
     Returns:
         (成功标志, 音频文件路径或错误信息)
@@ -353,12 +401,12 @@ def synthesize_single(item: TextItem, output_dir: str) -> Tuple[bool, str]:
         return True, "SKIPPED"
     
     # 构建请求
-    header = {"Authorization": f"Bearer;{VOLCENGINE_CONFIG['access_token']}"}
+    header = {"Authorization": f"Bearer;{api_config['access_token']}"}
     request_json = {
         "app": {
-            "appid": VOLCENGINE_CONFIG["appid"],
+            "appid": api_config["appid"],
             "token": "access_token",
-            "cluster": VOLCENGINE_CONFIG["cluster"]
+            "cluster": api_config["cluster"]
         },
         "user": {
             "uid": "dialect_dataset_generator"
@@ -383,8 +431,12 @@ def synthesize_single(item: TextItem, output_dir: str) -> Tuple[bool, str]:
     # 重试机制
     for attempt in range(MAX_RETRIES):
         try:
+            # 限流控制
+            if rate_limiter:
+                rate_limiter.acquire()
+            
             resp = requests.post(
-                VOLCENGINE_CONFIG["api_url"],
+                api_config["api_url"],
                 json=request_json,
                 headers=header,
                 timeout=REQUEST_TIMEOUT
@@ -424,58 +476,83 @@ def synthesize_single(item: TextItem, output_dir: str) -> Tuple[bool, str]:
 
 def synthesize_batch(items: List[TextItem], output_dir: str, qps_limit: int = QPS_LIMIT) -> Tuple[int, int]:
     """
-    批量合成音频（带限流）
+    批量合成音频（多API并行 + 全局限流）
     
     Args:
         items: TextItem列表
         output_dir: 输出目录
-        qps_limit: 每秒请求数限制
+        qps_limit: 每秒请求数限制（全局）
     
     Returns:
         (成功数, 失败数)
     """
+    # 初始化限流器和统计
+    rate_limiter = GlobalRateLimiter(qps_limit)
     success_count = 0
     fail_count = 0
-    failed_items = []
     skipped_count = 0
-    
+    failed_items = []
     total = len(items)
-    interval = 1.0 / qps_limit  # 请求间隔
+    completed = 0
     
-    logger.info(f"开始合成 {total} 条音频, QPS限制: {qps_limit}")
+    # 线程锁用于统计
+    stats_lock = threading.Lock()
+    
+    # Worker数量 = API账号数量
+    max_workers = len(VOLCENGINE_CONFIGS)
+    
+    logger.info(f"开始合成 {total} 条音频")
+    logger.info(f"使用 {max_workers} 个API账号并行下载，全局QPS限制: {qps_limit}")
     print(f"进度: 0/{total} [0%]", end='\r')
     
-    for i, item in enumerate(items):
-        start_time = time.time()
+    def process_item(item: TextItem, api_index: int):
+        """处理单个任务"""
+        nonlocal success_count, fail_count, skipped_count, completed
         
-        success, result = synthesize_single(item, output_dir)
+        # 选择API配置
+        api_config = VOLCENGINE_CONFIGS[api_index % len(VOLCENGINE_CONFIGS)]
         
-        if success:
-            success_count += 1
-            if result == "SKIPPED":
-                skipped_count += 1
-        else:
-            fail_count += 1
-            failed_items.append((item.utt_id, item.text[:30], result))
-            # logger.error(f"[{item.utt_id}] 合成失败: {result}") # 失败时打印日志会打断进度条，改为最后汇总或仅在严重错误时打印
-
-        # 进度条逻辑
-        percent = (i + 1) * 100 // total
-        bar_len = 30
-        filled_len = int(bar_len * (i + 1) / total)
-        bar = '=' * filled_len + '-' * (bar_len - filled_len)
+        # 调用合成
+        success, result = synthesize_single(item, output_dir, api_config, rate_limiter)
         
-        # 使用 sys.stdout 刷新
-        sys.stdout.write(f"\r[{bar}] {percent}% | {i + 1}/{total} [OK: {success_count - skipped_count}, Skip: {skipped_count}, Fail: {fail_count}]")
-        sys.stdout.flush()
+        # 更新统计
+        with stats_lock:
+            if success:
+                success_count += 1
+                if result == "SKIPPED":
+                    skipped_count += 1
+            else:
+                fail_count += 1
+                failed_items.append((item.utt_id, item.text[:30], result))
+            
+            completed += 1
+            
+            # 更新进度条
+            percent = completed * 100 // total
+            bar_len = 30
+            filled_len = int(bar_len * completed / total)
+            bar = '=' * filled_len + '-' * (bar_len - filled_len)
+            sys.stdout.write(f"\r[{bar}] {percent}% | {completed}/{total} [OK: {success_count - skipped_count}, Skip: {skipped_count}, Fail: {fail_count}]")
+            sys.stdout.flush()
+    
+    # 使用线程池并行处理
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务，轮询分配API
+        futures = []
+        for i, item in enumerate(items):
+            future = executor.submit(process_item, item, i)
+            futures.append(future)
         
-        # 限流 (如果是跳过的不需要限流)
-        if result != "SKIPPED":
-            elapsed = time.time() - start_time
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
-
-    print() # 换行
+        # 等待所有任务完成
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"任务执行异常: {e}")
+                with stats_lock:
+                    fail_count += 1
+    
+    print()  # 换行
     
     # 输出失败列表
     if failed_items:
