@@ -60,6 +60,9 @@ INSTRUCT_TEMPLATES = {
     # 吴语
     "shanghai": "请用上海话说。<|endofprompt|>",
     
+    # 情感（emotion 作为特殊方言处理）
+    "emotion": "请用普通话说。<|endofprompt|>",  # 情感数据已有逐句instruct，此为fallback
+    
     # 默认
     "default": "请用方言说。<|endofprompt|>"
 }
@@ -81,6 +84,7 @@ DIALECT_NAMES = {
     "yueyu": "粤语",
     "guangxi": "广西话",
     "shanghai": "上海话",
+    "emotion": "情感数据",
 }
 
 
@@ -113,14 +117,42 @@ def convert_single_audio(args: Tuple[str, str]) -> Tuple[bool, str]:
         return False, str(e)
 
 
-def generate_instruct_file(data_dir: Path, dialect: str) -> int:
-    """生成 instruct 文件（中文指令）"""
+def generate_instruct_file(data_dir: Path, dialect: str, force: bool = False) -> int:
+    """
+    生成 instruct 文件（中文指令）
+    
+    Args:
+        data_dir: 数据目录
+        dialect: 方言名称
+        force: 是否强制覆盖已有的 instruct 文件
+    
+    Returns:
+        生成的条目数
+    """
     text_file = data_dir / "text"
     instruct_file = data_dir / "instruct"
+    # 也检查 instruct.txt（ESD数据集格式）
+    instruct_txt_file = data_dir / "instruct.txt"
     
     if not text_file.exists():
         print(f"  ❌ 错误: {text_file} 不存在")
         return 0
+    
+    # 如果已存在 instruct 或 instruct.txt，且不强制覆盖，则跳过
+    if not force:
+        if instruct_file.exists():
+            with open(instruct_file, 'r', encoding='utf-8') as f:
+                count = sum(1 for _ in f)
+            print(f"  ⏭️ 跳过: instruct 已存在 ({count} 条)")
+            return count
+        if instruct_txt_file.exists():
+            # 将 instruct.txt 复制为 instruct（统一格式）
+            import shutil
+            shutil.copy(instruct_txt_file, instruct_file)
+            with open(instruct_file, 'r', encoding='utf-8') as f:
+                count = sum(1 for _ in f)
+            print(f"  ✅ 复制 instruct.txt -> instruct ({count} 条)")
+            return count
     
     instruct_text = INSTRUCT_TEMPLATES.get(dialect, INSTRUCT_TEMPLATES["default"])
     dialect_name = DIALECT_NAMES.get(dialect, dialect)
@@ -139,9 +171,20 @@ def generate_instruct_file(data_dir: Path, dialect: str) -> int:
     return count
 
 
-def combine_dialect_data(dataset_dir: Path, dialects: List[str], combined_dir: Path) -> Dict[str, int]:
+def combine_dialect_data(
+    dataset_dir: Path, 
+    dialects: List[str], 
+    combined_dir: Path,
+    extra_dirs: Optional[List[Path]] = None
+) -> Dict[str, int]:
     """
     合并所有方言数据到一个文件夹
+    
+    Args:
+        dataset_dir: 主数据集目录
+        dialects: 方言列表（相对于 dataset_dir）
+        combined_dir: 输出的合并目录
+        extra_dirs: 额外的数据目录列表（绝对路径，直接包含 wav.scp 等文件）
     
     生成的文件:
     - wav.scp: 合并的音频路径索引
@@ -168,6 +211,11 @@ def combine_dialect_data(dataset_dir: Path, dialects: List[str], combined_dir: P
     
     for dialect in dialects:
         data_dir = dataset_dir / dialect
+        
+        # 跳过 combined 目录，避免循环引用
+        if dialect == COMBINED_DIR or dialect == "combined":
+            print(f"  ⏭️ 跳过 combined 目录")
+            continue
         
         if not data_dir.exists():
             print(f"  ⚠️ 跳过不存在的目录: {dialect}")
@@ -224,6 +272,80 @@ def combine_dialect_data(dataset_dir: Path, dialects: List[str], combined_dir: P
         spk2utt_file = combined_dir / "spk2utt"
         with open(spk2utt_file, 'w', encoding='utf-8') as f:
             for spk, utts in spk2utt_data.items():
+                f.write(f"{spk} {' '.join(utts)}\n")
+        stats["total_speakers"] = len(spk2utt_data)
+        print(f"     spk2utt: {len(spk2utt_data)} 个说话人")
+    
+    # 处理额外目录
+    if extra_dirs:
+        print(f"\n  📂 处理额外数据目录...")
+        for extra_dir in extra_dirs:
+            extra_path = Path(extra_dir)
+            if not extra_path.exists():
+                print(f"  ⚠️ 跳过不存在的目录: {extra_dir}")
+                continue
+            
+            # 跳过 combined 目录，避免循环引用
+            if extra_path.name == COMBINED_DIR or extra_path.name == "combined":
+                print(f"  ⏭️ 跳过 combined 目录: {extra_path}")
+                continue
+            
+            # 检查必需文件
+            if not (extra_path / "text").exists():
+                print(f"  ⚠️ 跳过 {extra_path.name}: 缺少 text 文件")
+                continue
+            
+            print(f"  📂 处理 {extra_path.name}...")
+            extra_utt_count = 0
+            
+            for filename in files_to_merge:
+                file_path = extra_path / filename
+                # 也检查 .txt 后缀版本
+                if not file_path.exists():
+                    file_path = extra_path / f"{filename}.txt"
+                
+                if file_path.exists():
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                merged_data[filename].append(line)
+                                if filename == "text":
+                                    extra_utt_count += 1
+            
+            # 处理 spk2utt
+            spk2utt_file = extra_path / "spk2utt"
+            if spk2utt_file.exists():
+                with open(spk2utt_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            spk = parts[0]
+                            utts = parts[1:]
+                            if spk not in spk2utt_data:
+                                spk2utt_data[spk] = []
+                            spk2utt_data[spk].extend(utts)
+            
+            stats["total_utts"] += extra_utt_count
+            stats["dialects_processed"] += 1
+            print(f"     语音数: {extra_utt_count}")
+    
+    # 重新写入合并文件（包含额外目录的数据）
+    print("\n  📝 写入合并文件...")
+    
+    for filename, lines in merged_data.items():
+        if lines:
+            output_file = combined_dir / filename
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+            print(f"     {filename}: {len(lines)} 行")
+    
+    # 重新写入 spk2utt
+    if spk2utt_data:
+        spk2utt_file = combined_dir / "spk2utt"
+        with open(spk2utt_file, 'w', encoding='utf-8') as f:
+            for spk in sorted(spk2utt_data.keys()):
+                utts = spk2utt_data[spk]
                 f.write(f"{spk} {' '.join(utts)}\n")
         stats["total_speakers"] = len(spk2utt_data)
         print(f"     spk2utt: {len(spk2utt_data)} 个说话人")
@@ -380,6 +502,17 @@ def main():
         action="store_true",
         help="跳过音频格式转换（直接使用 MP3）"
     )
+    parser.add_argument(
+        "--extra-dirs",
+        nargs="*",
+        default=[],
+        help="额外的数据目录（如 dataset_emotion），会被合并到 combined 中"
+    )
+    parser.add_argument(
+        "--force-instruct",
+        action="store_true",
+        help="强制重新生成 instruct 文件（即使已存在）"
+    )
     
     args = parser.parse_args()
     
@@ -419,7 +552,15 @@ def main():
             data_dir = dataset_dir / dialect
             if data_dir.exists():
                 print(f"\n处理 {dialect} ({DIALECT_NAMES.get(dialect, dialect)}):")
-                generate_instruct_file(data_dir, dialect)
+                generate_instruct_file(data_dir, dialect, force=args.force_instruct)
+        
+        # 也处理额外目录的 instruct
+        if args.extra_dirs:
+            for extra_dir in args.extra_dirs:
+                extra_path = script_dir / extra_dir
+                if extra_path.exists():
+                    print(f"\n处理额外目录 {extra_path.name}:")
+                    generate_instruct_file(extra_path, extra_path.name, force=args.force_instruct)
     
     # ==================== 音频转换 ====================
     if args.mode in ["all", "convert"] and not args.no_convert:
@@ -443,7 +584,17 @@ def main():
         print("📦 合并所有方言数据")
         print("=" * 40)
         
-        combine_dialect_data(dataset_dir, dialects, combined_dir)
+        # 解析额外目录为绝对路径
+        extra_paths = []
+        if args.extra_dirs:
+            for extra_dir in args.extra_dirs:
+                extra_path = script_dir / extra_dir
+                if extra_path.exists():
+                    extra_paths.append(extra_path)
+                else:
+                    print(f"  ⚠️ 额外目录不存在: {extra_dir}")
+        
+        combine_dialect_data(dataset_dir, dialects, combined_dir, extra_dirs=extra_paths)
     
     # ==================== 验证数据 ====================
     if args.mode in ["all", "validate"]:
