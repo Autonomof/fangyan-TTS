@@ -14,6 +14,7 @@
 # limitations under the License.
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import onnxruntime
 import torch
 import torchaudio
@@ -30,7 +31,14 @@ def single_job(utt):
                        dither=0,
                        sample_frequency=16000)
     feat = feat - feat.mean(dim=0, keepdim=True)
-    embedding = ort_session.run(None, {ort_session.get_inputs()[0].name: feat.unsqueeze(dim=0).cpu().numpy()})[0].flatten().tolist()
+
+    # 串行保护：同一时刻只允许一个 GPU 推理，避免显存峰值叠加
+    with gpu_semaphore:
+        outputs = ort_session.run(
+            None,
+            {ort_session.get_inputs()[0].name: feat.unsqueeze(dim=0).cpu().numpy()}
+        )
+    embedding = outputs[0].flatten().tolist()
     return utt, embedding
 
 
@@ -67,11 +75,28 @@ if __name__ == "__main__":
             l = l.replace('\n', '').split()
             utt2spk[l[0]] = l[1]
 
+    # SessionOptions：避免内部并行也推高显存
     option = onnxruntime.SessionOptions()
     option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
     option.intra_op_num_threads = 1
-    providers = ["CPUExecutionProvider"]
+    option.inter_op_num_threads = 1
+
+    # CUDA EP 选项：关闭 CUDA Graph，限制显存与工作区，减少多流拷贝问题
+    cuda_provider_options = {
+        "enable_cuda_graph": 0,                    # 解决"stream is capturing"
+        "gpu_mem_limit": 2 * 1024 * 1024 * 1024,   # 按需调整，例如 2GB
+        "arena_extend_strategy": "kSameAsRequested",
+        "cudnn_conv_use_max_workspace": 0,
+        "cudnn_conv_algo_search": "HEURISTIC",
+        "do_copy_in_default_stream": 1,
+    }
+    providers = [("CUDAExecutionProvider", cuda_provider_options), "CPUExecutionProvider"]
     ort_session = onnxruntime.InferenceSession(args.onnx_path, sess_options=option, providers=providers)
+
+    # 仅对 GPU 推理限流（设为 1 保证串行）。如显存充裕可尝试升到 2。
+    gpu_semaphore = threading.Semaphore(1)
+
+    # 保留 CPU 侧并发（读取音频、计算 fbank 等），但 GPU 有信号量保护
     executor = ThreadPoolExecutor(max_workers=args.num_thread)
 
     main(args)
