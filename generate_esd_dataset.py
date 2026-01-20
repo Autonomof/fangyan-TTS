@@ -14,9 +14,9 @@ def generate_esd_dataset():
     # Happy/Surprise -> Happy instruction
     # Neutral -> Neutral instruction
     emotion_instruct_map = {
-        "Happy": "请以开心高兴的语气用普通话说",
-        "Surprise": "请以开心高兴的语气用普通话说",
-        "Neutral": "请以正常中立的语气用普通话说"
+        "Happy": "请以开心高兴的语气用普通话说<|endofprompt|>",
+        "Surprise": "请以开心高兴的语气用普通话说<|endofprompt|>",
+        "Neutral": "请以正常中立的语气用普通话说<|endofprompt|>"
     }
     
     # Ensure output directory exists
