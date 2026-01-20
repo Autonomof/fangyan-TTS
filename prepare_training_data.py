@@ -513,12 +513,24 @@ def main():
         action="store_true",
         help="强制重新生成 instruct 文件（即使已存在）"
     )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="合并输出目录的绝对路径（可选，默认为 dataset-dir/combined-name）"
+    )
     
     args = parser.parse_args()
     
     script_dir = Path(__file__).parent
     dataset_dir = script_dir / args.dataset_dir
-    combined_dir = dataset_dir / args.combined_name
+    
+    # 确定合并输出目录
+    if args.output_dir:
+        # 使用用户指定的绝对路径
+        combined_dir = Path(args.output_dir)
+    else:
+        # 默认为 dataset-dir/combined-name
+        combined_dir = dataset_dir / args.combined_name
     
     # 自动检测方言
     if args.dialects is None or len(args.dialects) == 0:
