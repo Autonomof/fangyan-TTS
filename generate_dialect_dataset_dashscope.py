@@ -13,6 +13,7 @@ import random
 import logging
 import threading
 import requests
+import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -170,28 +171,8 @@ def process_task(task: GenTask, api_key: str, limiter: GlobalRateLimiter) -> boo
         
         result = dashscope.MultiModalConversation.call(
             model="qwen3-tts-flash",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"text": task.text},
-                    ]
-                }
-            ],
-            # 注意：SDK 文档可能不同，这里参考用户提供的示例，但用户示例使用的是 text=text, voice=... 参数直接传给call
-            # 然而 MultiModalConversation 通常使用 messages 格式。
-            # 用户给的示例是:
-            # response = dashscope.MultiModalConversation.call(
-            #     model="qwen3-tts-flash",
-            #     api_key=...,
-            #     text=text,
-            #     voice="Cherry",
-            #     ...
-            # )
-            # 这可能是 SDK 对旧 接口的封装或者特定用法的语法糖。
-            # 既然用户给出了明确代码，我们优先尝试按用户代码的参数形式调用。
-            # 如果是 SpeechSynthesizer 接口重命名而来，参数应该类似。
-            
+            # 用户示例中没有 messages，只有 text, voice 等参数
+            # 尝试完全匹配用户提供的示例代码
             text=task.text,
             voice=task.voice,
             language_type=task.language_type,
@@ -209,79 +190,58 @@ def process_task(task: GenTask, api_key: str, limiter: GlobalRateLimiter) -> boo
             # 成功时 status_code HTTP_OK (200)
             # 输出在 result.output
             
-            # 假设 result.output.choices[0].message.audio_url 或者直接在 output 中
-            # 重新查看用户提供的 url 获取说明: "通过返回的url来获取合成的语音"
-            
             # 尝试从 result 中提取 url
-            # 常见的 response 结构：
-            # {
-            #   "status_code": 200,
-            #   "request_id": "...",
-            #   "code": "",
-            #   "message": "",
-            #   "output": {
-            #       "choices": [
-            #           {
-            #               "message": {
-            #                   "content": [ ... ],
-            #                   "role": "assistant"
-            #               },
-            #               "finish_reason": "stop"
-            #           }
-            #       ]
-            #   },
-            #   "usage": ...
-            # }
-            # 但是对于 TTS Flash，可能直接返回 binary 或者 url?
-            # 必须仔细处理。如果 sample code 说返回 url。
-            
-            # 让我们尝试 inspect result
-            if hasattr(result, 'output') and result.output:
-                # 针对 qwen-tts-flash，可能是一个 audio url
-                # 实测中，SDK 的 SpeechSynthesizer.call 返回的 result 包含 get_audio_data() 吗？
-                # 用户说 "通过返回的url来获取"。
-                
-                # 假设 result 是 DashScopeResponse
-                if isinstance(result.output, dict):
-                    # 尝试查找 url
-                    # 某些版本的 SDK 可能是 result.output['choices'][0]['message']['content'][0]['audio_url'] ?
-                    # 或者 result.output 可能是 bytes?
-                    pass
-                
-                # 让我们通过 try block 来捕获 url
-                # 通常是 result.output['choices'][0]['message']['content'] ...
-                # 或者 result.output 是音频二进制？
-                pass
-
-            # 为保险起见，我们只能假设代码能跑通，并捕获 URL。
-            # 如果是按照 SpeechSynthesizer 的逻辑，返回的可能是 audio binary (如果是 stream)
-            # 但这里 stream=False
-            
-            # 再次参考: "URL 有效期为24 小时" -> 说明返回的是 URL。
-            
-            # 让我们做一个假设结构探测
             audio_url = None
+            
+            # Helper function to find audio_url recursively
+            def find_audio_url(obj):
+                if isinstance(obj, dict):
+                    if 'audio_url' in obj: return obj['audio_url']
+                    if 'url' in obj and isinstance(obj['url'], str) and obj['url'].startswith('http'): return obj['url']
+                    for k, v in obj.items():
+                        res = find_audio_url(v)
+                        if res: return res
+                elif isinstance(obj, list):
+                    for item in obj:
+                        res = find_audio_url(item)
+                        if res: return res
+                elif hasattr(obj, '__dict__'):
+                    return find_audio_url(obj.__dict__)
+                return None
+
             try:
-                # 尝试路径 1: result.output.choices[0].message.content[x].audio_url
-                choices = result.output.choices
-                for choice in choices:
-                   if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-                       for item in choice.message.content:
-                           if isinstance(item, dict) and 'audio_url' in item:
-                               audio_url = item['audio_url']
-                               break
-            except:
-                pass
-            
-            # 如果没找到，尝试直接打印 (在 dry-run 或者 test 中验证)
-            # 这里我们简单地保存 result 到 log 如果失败
-            
+                # 首先尝试标准路径 (Result Object)
+                if hasattr(result, 'output'):
+                     # Standard DashScope response structure (often output.choices[0].message.content...)
+                     audio_url = find_audio_url(result.output)
+                
+                # 如果还是没有，尝试搜索整个 result
+                if not audio_url:
+                    audio_url = find_audio_url(result)
+                
+                # Regex Fallback
+                if not audio_url:
+                    s = str(result)
+                    # search for "audio_url": "..." or "url": "..."
+                    for key in ['audio_url', 'url']:
+                        match = re.search(fr'"{key}"\s*:\s*"([^"]+)"', s)
+                        if match: 
+                            audio_url = match.group(1)
+                            break
+                        match = re.search(fr"'{key}'\s*:\s*'([^']+)'", s)
+                        if match:
+                            audio_url = match.group(1)
+                            break
+                    
+            except Exception as e:
+                logger.error(f"解析音频URL时发生异常: {e}")
+
             if audio_url:
                 download_audio(audio_url, task.output_path)
                 return True
             else:
-                 # 也许 result 本身就是？
-                 logger.error(f"无法解析音频 URL: {result}")
+                 logger.error(f"无法解析音频 URL. 完整响应: {result}")
+                 print(f"DEBUG FULL RESULT: {result}")
                  return False
 
         else:
