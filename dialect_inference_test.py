@@ -61,7 +61,7 @@ def main():
                         default="CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B",
                         help="预训练模型目录")
     parser.add_argument("--finetuned_llm", type=str,
-                        default="CosyVoice/examples/dialect/cosyvoice3/exp/dialect/llm/torch_ddp/llm.pt",
+                        default="CosyVoice/examples/dialect/cosyvoice3/exp/dialect_emotion/llm/torch_ddp/epoch_20_whole.pt",
                         help="微调后的 LLM 权重路径 (可选)")
     parser.add_argument("--prompt_wav", type=str,
                         default="/sharedata/user/qianbin/xiaowu.wav",
