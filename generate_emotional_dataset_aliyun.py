@@ -33,8 +33,24 @@ import random
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from typing import List, Dict, Tuple
+from dataclasses import dataclass
+
+# 加载 .env 配置
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # 尝试手动加载 .env
+    from pathlib import Path
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    k, v = line.split('=', 1)
+                    os.environ[k.strip()] = v.strip()
 
 # 尝试导入 nls 库
 try:
@@ -290,7 +306,7 @@ def process_task(task: GenTask, appkey: str, token: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="阿里云情感语音生成器")
-    parser.add_argument("--appkey", required=True, help="阿里云 AppKey")
+    parser.add_argument("--appkey", default=os.getenv('ALIYUN_APPKEY'), help="阿里云 AppKey (默认从环境变量 ALIYUN_APPKEY 获取)")
     parser.add_argument("--token", help="阿里云 AccessToken (可选，未提供则尝试使用 AK/SK 获取)")
     parser.add_argument("--ak-id", help="阿里云 AccessKey ID (用于自动获取Token)")
     parser.add_argument("--ak-secret", help="阿里云 AccessKey Secret (用于自动获取Token)")
@@ -301,6 +317,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="仅生成文件列表，不调用TTS API")
     
     args = parser.parse_args()
+
+    if not args.appkey:
+        logger.error("未提供 AppKey (参数 --appkey 或 环境变量 ALIYUN_APPKEY)")
+        sys.exit(1)
     
     # 0. 检查并获取 Token
     token = args.token
