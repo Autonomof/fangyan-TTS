@@ -62,12 +62,6 @@ DIALECT_CONFIG = {
         "desc": "南京话 (Li)",
         "language_type": "Chinese"
     },
-    "shaanxi": {
-        "voice": "Marcus",
-        "instruct": "请用陕西话/关中方言说<|endofprompt|>",
-        "desc": "陕西话 (Marcus)",
-        "language_type": "Chinese"
-    },
     "minnan": {
         "voice": "Roy",
         "instruct": "请用闽南语说<|endofprompt|>",
