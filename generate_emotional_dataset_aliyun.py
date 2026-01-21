@@ -32,6 +32,7 @@ import argparse
 import random
 import logging
 import threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple
 from dataclasses import dataclass
@@ -74,7 +75,8 @@ except ImportError:
 
 # ==================== 配置区 ====================
 
-# ==================== 配置区 ====================
+# QPS 限制
+QPS_LIMIT = 2
 
 # 支持多情感的音色列表
 # 所有下列音色都支持 6 种基础情感: angry, fear, happy, neutral, sad, surprise
@@ -254,13 +256,49 @@ def load_texts(file_path: str, count: int = -1) -> List[str]:
         return random.sample(texts, count)
     return texts
 
+# ==================== 全局限流器 ====================
+
+class GlobalRateLimiter:
+    """全局QPS限流器（支持多线程）"""
+    def __init__(self, qps: int):
+        self.qps = qps
+        self.timestamps = deque()
+        self.lock = threading.Lock()
+    
+    def acquire(self):
+        """获取请求许可，如需等待则自动sleep"""
+        if self.qps <= 0: return
+        
+        with self.lock:
+            now = time.time()
+            # 清理1秒前的时间戳
+            while self.timestamps and self.timestamps[0] < now - 1.0:
+                self.timestamps.popleft()
+            
+            # 如果1秒内已有qps个请求，计算需等待时间
+            if len(self.timestamps) >= self.qps:
+                sleep_time = 1.0 - (now - self.timestamps[0])
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                    now = time.time()
+                    # 重新清理
+                    while self.timestamps and self.timestamps[0] < now - 1.0:
+                        self.timestamps.popleft()
+            
+            # 记录本次请求
+            self.timestamps.append(now)
+
 # ==================== 合成核心逻辑 ====================
 
-def process_task(task: GenTask, appkey: str, token: str) -> bool:
+def process_task(task: GenTask, appkey: str, token: str, rate_limiter: GlobalRateLimiter) -> bool:
     """处理单个合成任务"""
     if os.path.exists(task.output_path):
         # logger.info(f"Skip existing: {task.output_path}")
         return True
+
+    # 获取限流许可
+    if rate_limiter:
+        rate_limiter.acquire()
 
     callback = TtsCallback(task.output_path)
     
@@ -305,16 +343,20 @@ def process_task(task: GenTask, appkey: str, token: str) -> bool:
 # ==================== 主程序 ====================
 
 def main():
+    # 设置随机种子以确保任务列表生成的一致性（支持断点续传）
+    random.seed(42)
+    
     parser = argparse.ArgumentParser(description="阿里云情感语音生成器")
-    parser.add_argument("--appkey", default=os.getenv('ALIYUN_APPKEY'), help="阿里云 AppKey (默认从环境变量 ALIYUN_APPKEY 获取)")
-    parser.add_argument("--token", help="阿里云 AccessToken (可选，未提供则尝试使用 AK/SK 获取)")
-    parser.add_argument("--ak-id", help="阿里云 AccessKey ID (用于自动获取Token)")
-    parser.add_argument("--ak-secret", help="阿里云 AccessKey Secret (用于自动获取Token)")
+    parser.add_argument("--appkey", default=os.getenv('ALIYUN_APPKEY'), help="阿里云 AppKey")
+    parser.add_argument("--token", help="阿里云 AccessToken")
+    parser.add_argument("--ak-id", help="阿里云 AccessKey ID")
+    parser.add_argument("--ak-secret", help="阿里云 AccessKey Secret")
     parser.add_argument("--input-file", default=AISHELL_FILE, help="输入文本文件路径")
     parser.add_argument("--output-dir", default=OUTPUT_DIR, help="输出目录")
     parser.add_argument("--count", type=int, default=SAMPLES_PER_EMOTION, help="每种情感生成的句子数")
     parser.add_argument("--workers", type=int, default=MAX_WORKERS, help="并发线程数")
     parser.add_argument("--dry-run", action="store_true", help="仅生成文件列表，不调用TTS API")
+    parser.add_argument("--qps", type=int, default=QPS_LIMIT, help="QPS 限制")
     
     args = parser.parse_args()
 
@@ -395,13 +437,16 @@ def main():
     success_count = 0
     fail_count = 0
     
+    # 初始化限流器
+    limiter = GlobalRateLimiter(args.qps) if not args.dry_run else None
+
     if args.dry_run:
         logger.info("Dry Run模式: 跳过TTS合成步骤")
         success_count = len(tasks)
         # Dry Run 模式下不创建空文件，直接通过内存中的 tasks 列表生成索引
     else:
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(process_task, task, args.appkey, token): task for task in tasks}
+            futures = {executor.submit(process_task, task, args.appkey, token, limiter): task for task in tasks}
             
             for i, future in enumerate(as_completed(futures)):
                 task = futures[future]
